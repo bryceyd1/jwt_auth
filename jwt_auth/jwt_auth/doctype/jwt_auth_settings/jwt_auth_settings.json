@@ -7,6 +7,7 @@
  "field_order": [
   "parameters_section",
   "enabled",
+  "provider",
   "enable_user_reg",
   "jwt_header",
   "jwks_url",
@@ -14,7 +15,15 @@
   "enable_login",
   "login_url",
   "logout_url",
-  "redirect_param"
+  "redirect_param",
+  "cloudflare_section",
+  "team_name",
+  "aud_tag",
+  "keycloak_section",
+  "keycloak_server_url",
+  "keycloak_realm",
+  "keycloak_client_id",
+  "keycloak_client_secret"
  ],
  "fields": [
   {
@@ -63,6 +72,14 @@
    "label": "Enable JWT User Auth"
   },
   {
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "label": "Provider",
+   "options": "Cloudflare Access\nKeycloak",
+   "default": "Cloudflare Access",
+   "mandatory_depends_on": "enabled"
+  },
+  {
    "default": "1",
    "fieldname": "enable_user_reg",
    "fieldtype": "Check",
@@ -79,6 +96,54 @@
    "fieldtype": "Data",
    "label": "Logout URL",
    "width": "100%"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "cloudflare_section",
+   "fieldtype": "Section Break",
+   "label": "Cloudflare Access Configuration"
+  },
+  {
+   "fieldname": "team_name",
+   "fieldtype": "Data",
+   "label": "Team Name",
+   "description": "Your Cloudflare Access team name"
+  },
+  {
+   "fieldname": "aud_tag",
+   "fieldtype": "Data",
+   "label": "AUD Tag",
+   "description": "The AUD (audience) tag issued by Cloudflare"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "keycloak_section",
+   "fieldtype": "Section Break",
+   "label": "Keycloak Configuration"
+  },
+  {
+   "fieldname": "keycloak_server_url",
+   "fieldtype": "Data",
+   "label": "Keycloak Server URL",
+   "description": "e.g., https://keycloak.example.com"
+  },
+  {
+   "fieldname": "keycloak_realm",
+   "fieldtype": "Data",
+   "label": "Keycloak Realm",
+   "description": "The Keycloak realm name"
+  },
+  {
+   "fieldname": "keycloak_client_id",
+   "fieldtype": "Data",
+   "label": "Keycloak Client ID",
+   "description": "The client ID configured in Keycloak"
+  },
+  {
+   "fieldname": "keycloak_client_secret",
+   "fieldtype": "Password",
+   "label": "Keycloak Client Secret",
+   "description": "The client secret (optional, for confidential clients)"
   }
  ],
  "index_web_pages_for_search": 1,

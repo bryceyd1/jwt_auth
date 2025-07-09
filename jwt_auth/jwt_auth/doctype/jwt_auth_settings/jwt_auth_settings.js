@@ -3,7 +3,10 @@
 
 frappe.ui.form.on("JWT Auth Settings", {
 	refresh(frm) {
-		toggle_provider_fields(frm);
+		// Only toggle fields if provider field exists
+		if (frm.doc.provider !== undefined) {
+			toggle_provider_fields(frm);
+		}
 	},
 
 	provider(frm) {
@@ -14,22 +17,32 @@ frappe.ui.form.on("JWT Auth Settings", {
 function toggle_provider_fields(frm) {
 	const provider = frm.doc.provider;
 	
-	// Show/hide Cloudflare Access fields
-	frm.toggle_display("cloudflare_section", provider === "Cloudflare Access");
-	frm.toggle_display("team_name", provider === "Cloudflare Access");
-	frm.toggle_display("aud_tag", provider === "Cloudflare Access");
+	// Check if fields exist before trying to toggle them
+	const hasCloudflareFields = frm.fields_dict.team_name && frm.fields_dict.aud_tag;
+	const hasKeycloakFields = frm.fields_dict.keycloak_server_url && frm.fields_dict.keycloak_realm;
 	
-	// Show/hide Keycloak fields
-	frm.toggle_display("keycloak_section", provider === "Keycloak");
-	frm.toggle_display("keycloak_server_url", provider === "Keycloak");
-	frm.toggle_display("keycloak_realm", provider === "Keycloak");
-	frm.toggle_display("keycloak_client_id", provider === "Keycloak");
-	frm.toggle_display("keycloak_client_secret", provider === "Keycloak");
+	if (hasCloudflareFields) {
+		// Show/hide Cloudflare Access fields
+		frm.toggle_display("cloudflare_section", provider === "Cloudflare Access");
+		frm.toggle_display("team_name", provider === "Cloudflare Access");
+		frm.toggle_display("aud_tag", provider === "Cloudflare Access");
+		
+		// Update field requirements
+		frm.toggle_reqd("team_name", provider === "Cloudflare Access");
+		frm.toggle_reqd("aud_tag", provider === "Cloudflare Access");
+	}
 	
-	// Update field requirements
-	frm.toggle_reqd("team_name", provider === "Cloudflare Access");
-	frm.toggle_reqd("aud_tag", provider === "Cloudflare Access");
-	frm.toggle_reqd("keycloak_server_url", provider === "Keycloak");
-	frm.toggle_reqd("keycloak_realm", provider === "Keycloak");
-	frm.toggle_reqd("keycloak_client_id", provider === "Keycloak");
+	if (hasKeycloakFields) {
+		// Show/hide Keycloak fields
+		frm.toggle_display("keycloak_section", provider === "Keycloak");
+		frm.toggle_display("keycloak_server_url", provider === "Keycloak");
+		frm.toggle_display("keycloak_realm", provider === "Keycloak");
+		frm.toggle_display("keycloak_client_id", provider === "Keycloak");
+		frm.toggle_display("keycloak_client_secret", provider === "Keycloak");
+		
+		// Update field requirements
+		frm.toggle_reqd("keycloak_server_url", provider === "Keycloak");
+		frm.toggle_reqd("keycloak_realm", provider === "Keycloak");
+		frm.toggle_reqd("keycloak_client_id", provider === "Keycloak");
+	}
 }

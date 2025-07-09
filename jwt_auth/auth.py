@@ -20,22 +20,39 @@ class JWTAuth:
     def __init__(self, path=None, http_status_code=None):
         self.path = path
         self.http_status_code = http_status_code
-        self.settings = frappe.get_cached_doc("JWT Auth Settings")
-        self.provider = self.get_provider()
+        self.settings = None
+        self.provider = None
         self.claims = None
         self.user_email = None
         self.token = None
         self.redirect_to = None
+        
+        # Initialize with error handling
+        try:
+            self.settings = frappe.get_cached_doc("JWT Auth Settings")
+            self.provider = self.get_provider()
+        except Exception as e:
+            frappe.log_error(f"JWT Auth initialization error: {str(e)}", "JWT Auth Error")
+            # Set to disabled state if we can't load settings
+            self.settings = type('MockSettings', (), {'enabled': False})()
+            self.provider = None
 
     def get_provider(self):
         """Get the appropriate provider based on settings."""
-        provider_name = getattr(self.settings, 'provider', 'Cloudflare Access')
-        
-        if provider_name == 'Keycloak':
-            return KeycloakProvider(self.settings)
-        else:
-            # Default to Cloudflare Access
-            return CloudflareAccessProvider(self.settings)
+        try:
+            if not self.settings:
+                return None
+                
+            provider_name = getattr(self.settings, 'provider', 'Cloudflare Access')
+            
+            if provider_name == 'Keycloak':
+                return KeycloakProvider(self.settings)
+            else:
+                # Default to Cloudflare Access
+                return CloudflareAccessProvider(self.settings)
+        except Exception as e:
+            frappe.log_error(f"JWT Provider initialization error: {str(e)}", "JWT Auth Error")
+            return None
 
     def auth(self):
         self.user_email = self.claims.get("email") if self.claims.get("email") else None
@@ -66,32 +83,38 @@ class JWTAuth:
             self.auth()
 
     def can_auth(self):
-        if self.redirect_to:
-            return False
-        if frappe.local.session.user and frappe.local.session.user != "Guest":
-            return False
-        if not self.settings.enabled:
-            return False
-        if frappe.flags.get("jwt_logout_redirect", False):
-            return False
-        
-        # For Keycloak OAuth2 flow, check if we're already in an authentication flow
-        provider_name = getattr(self.settings, 'provider', 'Cloudflare Access')
-        if provider_name == 'Keycloak':
-            # For Keycloak, we might not have a direct JWT token in headers
-            # Instead, users go through OAuth2 flow
-            self.token = self.get_token(frappe.local.request)
-            if self.token and self.is_valid_token(self.token):
-                return True
-            # If no valid token, user will be redirected to login
-            return False
-        else:
-            # For Cloudflare Access and other direct JWT providers
-            self.token = self.get_token(frappe.local.request)
-            if not self.token:
+        try:
+            if self.redirect_to:
                 return False
-            if self.is_valid_token(self.token):
-                return True
+            if frappe.local.session.user and frappe.local.session.user != "Guest":
+                return False
+            if not self.settings or not self.settings.enabled:
+                return False
+            if frappe.flags.get("jwt_logout_redirect", False):
+                return False
+            if not self.provider:
+                return False
+            
+            # For Keycloak OAuth2 flow, check if we're already in an authentication flow
+            provider_name = getattr(self.settings, 'provider', 'Cloudflare Access')
+            if provider_name == 'Keycloak':
+                # For Keycloak, we might not have a direct JWT token in headers
+                # Instead, users go through OAuth2 flow
+                self.token = self.get_token(frappe.local.request)
+                if self.token and self.is_valid_token(self.token):
+                    return True
+                # If no valid token, user will be redirected to login
+                return False
+            else:
+                # For Cloudflare Access and other direct JWT providers
+                self.token = self.get_token(frappe.local.request)
+                if not self.token:
+                    return False
+                if self.is_valid_token(self.token):
+                    return True
+        except Exception as e:
+            frappe.log_error(f"JWT can_auth error: {str(e)}", "JWT Auth Error")
+            return False
 
     def update(self, path, http_status_code):
         self.path = path
@@ -390,4 +413,19 @@ def callback():
 
 
 def validate_auth():
-    SessionJWTAuth().validate_auth()
+    """Main authentication validation function called by Frappe hooks."""
+    try:
+        # Only run if we have a valid request context
+        if not hasattr(frappe.local, 'request') or not frappe.local.request:
+            return
+            
+        # Skip validation for static assets and system endpoints
+        if frappe.local.request.path.startswith(('/assets/', '/files/', '/private/', '/api/method/frappe.')):
+            return
+            
+        # Initialize and validate JWT authentication
+        SessionJWTAuth().validate_auth()
+    except Exception as e:
+        # Log the error but don't break the application
+        frappe.log_error(f"JWT Auth validation error: {str(e)}", "JWT Auth Error")
+        # Don't re-raise the exception to avoid breaking the application
