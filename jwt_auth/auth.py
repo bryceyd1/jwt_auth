@@ -3,6 +3,7 @@ import json
 import jwt
 import requests
 from urllib.parse import quote
+from jwt_auth.providers import CloudflareAccessProvider, KeycloakProvider
 
 class SessionJWTAuth:
     def __init__(self, path=None, http_status_code=None):
@@ -20,10 +21,21 @@ class JWTAuth:
         self.path = path
         self.http_status_code = http_status_code
         self.settings = frappe.get_cached_doc("JWT Auth Settings")
+        self.provider = self.get_provider()
         self.claims = None
         self.user_email = None
         self.token = None
         self.redirect_to = None
+
+    def get_provider(self):
+        """Get the appropriate provider based on settings."""
+        provider_name = getattr(self.settings, 'provider', 'Cloudflare Access')
+        
+        if provider_name == 'Keycloak':
+            return KeycloakProvider(self.settings)
+        else:
+            # Default to Cloudflare Access
+            return CloudflareAccessProvider(self.settings)
 
     def auth(self):
         self.user_email = self.claims.get("email") if self.claims.get("email") else None
@@ -62,49 +74,61 @@ class JWTAuth:
             return False
         if frappe.flags.get("jwt_logout_redirect", False):
             return False
-        self.token = self.get_token(frappe.local.request)
-        if not self.token:
+        
+        # For Keycloak OAuth2 flow, check if we're already in an authentication flow
+        provider_name = getattr(self.settings, 'provider', 'Cloudflare Access')
+        if provider_name == 'Keycloak':
+            # For Keycloak, we might not have a direct JWT token in headers
+            # Instead, users go through OAuth2 flow
+            self.token = self.get_token(frappe.local.request)
+            if self.token and self.is_valid_token(self.token):
+                return True
+            # If no valid token, user will be redirected to login
             return False
-        if self.is_valid_token(self.token):
-            return True
+        else:
+            # For Cloudflare Access and other direct JWT providers
+            self.token = self.get_token(frappe.local.request)
+            if not self.token:
+                return False
+            if self.is_valid_token(self.token):
+                return True
 
     def update(self, path, http_status_code):
         self.path = path
         self.http_status_code = http_status_code
+        # Refresh provider in case settings changed
+        self.provider = self.get_provider()
 
     def get_login_url(self, redirect_to=None):
-        login_url = self.settings.login_url
-        if self.settings.redirect_param:
-            redirect_to = redirect_to if redirect_to else self.path
-            path = "%2F" + quote(redirect_to, safe="")
-            if "?" in login_url:
-                login_url += f"&{self.settings.redirect_param}={path}"
-            else:
-                login_url += f"?{self.settings.redirect_param}={path}"
-        return login_url
+        """Get login URL from the provider."""
+        return self.provider.get_login_url(redirect_to or self.path)
 
     def get_logout_url(self):
-        logout_url = self.settings.logout_url
-        if self.settings.redirect_param:
-            logout_url += f"?{self.settings.redirect_param}={frappe.local.request.url}"
-        return logout_url
+        """Get logout URL from the provider."""
+        return self.provider.get_logout_url()
 
     def get_public_keys(self):
-        r = requests.get(self.settings.jwks_url)
-        public_keys = []
-        jwk_set = r.json()
-        for key_dict in jwk_set["keys"]:
-            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key_dict))
-            public_keys.append(public_key)
-        return public_keys
+        """Get public keys from the provider."""
+        return self.provider.get_public_keys()
 
     def get_token(self, request):
+        """Get token from request using provider's header."""
+        header_name = self.provider.jwt_header
+        
+        # Handle Authorization header specially for Bearer tokens
+        if header_name == "Authorization":
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                return auth_header[7:]  # Remove "Bearer " prefix
+            return None
+        
+        # For other headers (like Cf-Access-Token), check both cookies and headers
         token = (
-            request.cookies.get(self.settings.jwt_header)
-            if request.cookies.get(self.settings.jwt_header)
+            request.cookies.get(header_name)
+            if request.cookies.get(header_name)
             else (
-                request.headers.get(self.settings.jwt_header)
-                if request.headers.get(self.settings.jwt_header)
+                request.headers.get(header_name)
+                if request.headers.get(header_name)
                 else None
             )
         )
@@ -112,20 +136,48 @@ class JWTAuth:
 
     def is_valid_token(self, token):
         keys = self.get_public_keys()
-        secret = self.settings.get_password("jwt_private_secret")
+        secret = self.provider.jwt_private_secret
         valid_token = False
+        
+        # Try different algorithms that providers might use
+        algorithms = ["RS256", "HS256", "ES256"]
+        
         for key in keys:
-            try:
-                self.claims = jwt.decode(
-                    token,
-                    key=key,
-                    audience=secret,
-                    algorithms=["RS256"],
-                )
-                valid_token = True
+            for algorithm in algorithms:
+                try:
+                    # For Keycloak, we might not need audience validation in some cases
+                    decode_options = {
+                        "verify_signature": True,
+                        "verify_exp": True,
+                        "verify_nbf": True,
+                        "verify_iat": True,
+                        "verify_aud": bool(secret)  # Only verify audience if secret is provided
+                    }
+                    
+                    if secret:
+                        self.claims = jwt.decode(
+                            token,
+                            key=key,
+                            audience=secret,
+                            algorithms=[algorithm],
+                            options=decode_options
+                        )
+                    else:
+                        self.claims = jwt.decode(
+                            token,
+                            key=key,
+                            algorithms=[algorithm],
+                            options=decode_options
+                        )
+                    valid_token = True
+                    break
+                except jwt.InvalidTokenError:
+                    continue
+                except Exception as e:
+                    frappe.log_error(f"JWT validation error: {str(e)}", "JWT Auth")
+                    continue
+            if valid_token:
                 break
-            except:
-                pass
         return valid_token
 
     def register_user(self, user_email):
@@ -170,6 +222,54 @@ class JWTAuth:
             user.insert(ignore_permissions=True)
 
             self.redirect_to = f"/update-profile/{user_email}/edit"
+
+        frappe.db.commit()
+
+    def register_user_from_userinfo(self, user_email, userinfo):
+        """Register a new user from Keycloak userinfo."""
+        contact = frappe.db.get_value(
+            "Contact Email", {"email_id": user_email}, "parent"
+        )
+
+        if contact:
+            contact = frappe.get_doc("Contact", contact)
+            user = frappe.get_doc(
+                {
+                    "doctype": "User",
+                    "email": user_email,
+                    "username": user_email,
+                    "first_name": userinfo.get("given_name") or contact.first_name or "[Change Me]",
+                    "last_name": userinfo.get("family_name") or contact.last_name,
+                    "full_name": userinfo.get("name") or contact.full_name,
+                    "phone": contact.phone,
+                    "mobile_no": contact.mobile_no,
+                    "gender": contact.gender,
+                    "send_welcome_email": 0,
+                    "company_name": contact.company_name,
+                }
+            )
+            user.insert(ignore_permissions=True)
+
+            contact.user = user_email
+            contact.save(ignore_permissions=True)
+
+            if not userinfo.get("given_name") and not contact.first_name:
+                self.redirect_to = f"/update-profile/{user_email}/edit"
+        else:
+            user = frappe.get_doc(
+                {
+                    "doctype": "User",
+                    "email": user_email,
+                    "first_name": userinfo.get("given_name") or "[Change Me]",
+                    "last_name": userinfo.get("family_name"),
+                    "full_name": userinfo.get("name"),
+                    "send_welcome_email": 0,
+                }
+            )
+            user.insert(ignore_permissions=True)
+
+            if not userinfo.get("given_name"):
+                self.redirect_to = f"/update-profile/{user_email}/edit"
 
         frappe.db.commit()
 
@@ -221,6 +321,72 @@ def web_logout():
         location = "/login"
     frappe.local.response["type"] = "redirect"
     frappe.local.response["location"] = location
+
+
+@frappe.whitelist()
+def callback():
+    """Handle OAuth2 callback from Keycloak."""
+    auth = SessionJWTAuth()
+    
+    # Only handle Keycloak callbacks
+    if getattr(auth.settings, 'provider', 'Cloudflare Access') != 'Keycloak':
+        frappe.throw("Invalid callback for current provider")
+    
+    provider = auth.provider
+    code = frappe.local.request.args.get('code')
+    state = frappe.local.request.args.get('state')
+    error = frappe.local.request.args.get('error')
+    
+    if error:
+        frappe.throw(f"OAuth2 error: {error}")
+    
+    if not code:
+        frappe.throw("No authorization code received")
+    
+    try:
+        # Exchange code for tokens
+        site_url = frappe.utils.get_url()
+        redirect_uri = f"{site_url}/api/method/jwt_auth.auth.callback"
+        token_response = provider.exchange_code_for_token(code, redirect_uri)
+        
+        # Get user info using access token
+        access_token = token_response.get('access_token')
+        if access_token:
+            userinfo = provider.get_userinfo(access_token)
+            user_email = userinfo.get('email')
+            
+            if user_email:
+                # Check if user exists
+                Contact = frappe.qb.DocType("Contact")
+                ContactEmail = frappe.qb.DocType("Contact Email")
+                user_exists = (
+                    frappe.qb.from_(Contact)
+                    .select("user")
+                    .join(ContactEmail)
+                    .on(Contact.name == ContactEmail.parent)
+                    .where(ContactEmail.email_id == user_email)
+                ).run(as_dict=True)
+                
+                if user_exists and user_exists[0].get('user', False):
+                    frappe.local.login_manager.login_as(user_exists[0].get("user"))
+                elif auth.settings.enable_user_reg:
+                    auth.register_user_from_userinfo(user_email, userinfo)
+                    frappe.local.login_manager.login_as(user_email)
+                else:
+                    frappe.throw("User registration is disabled")
+                
+                # Redirect to original page or state
+                redirect_to = state or "/"
+                frappe.local.response["type"] = "redirect"
+                frappe.local.response["location"] = redirect_to
+            else:
+                frappe.throw("No email found in user info")
+        else:
+            frappe.throw("No access token received")
+            
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Keycloak OAuth2 Callback Error")
+        frappe.throw(f"Authentication failed: {str(e)}")
 
 
 def validate_auth():
